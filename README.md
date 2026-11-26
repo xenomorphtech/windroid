@@ -128,7 +128,7 @@ The app's window opens on the desktop. Mouse clicks become touch events. `script
 4. Run the game, then tap the title screen and press 게임 시작 (Game Start):
 
    ```sh
-   ./run-og.sh 1800       # seconds before timeout; extra wwd flags may follow
+   ./run-og.sh            # optional: ./run-og.sh <seconds> [wwd flags] to auto-kill after that long
    ```
 
 The fake JVM answers Nexon SDK calls with a fixed local identity: npsn 1001, token `LOCAL_TEST_TOKEN`, region KR.

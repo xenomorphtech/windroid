@@ -267,6 +267,7 @@ void java_register_all(void) {
     if (wwd_pkg_dir[0]) load_metadata();
 
     // --- meta-data and preferences ---
+    reg("HasExtraIgnoreView", "()Z", zero); // no extra overlay view to exclude from input
     reg("AndroidThunkJava_GetMetaDataBoolean", "(Ljava/lang/String;)Z", md_bool);
     reg("AndroidThunkJava_GetMetaDataInt", "(Ljava/lang/String;)I", md_int);
     reg("AndroidThunkJava_GetMetaDataLong", "(Ljava/lang/String;)J", md_long);
