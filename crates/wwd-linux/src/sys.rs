@@ -903,10 +903,24 @@ fn openat(t: &Thread, dirfd: i64, path: u64, flags: u32) -> i64 {
         Ok(node) => {
             let f = fs::open_ref(node, flags);
             *f.path.lock().unwrap() = path.clone();
+            if trace_open() {
+                eprintln!("[wwd] open {path}");
+            }
             t.proc.fds.lock().unwrap().alloc(f, flags & O_CLOEXEC != 0, 0)
         }
-        Err(e) => -e,
+        Err(e) => {
+            if trace_open() {
+                eprintln!("[wwd] open FAILED ({e}) {path}");
+            }
+            -e
+        }
     }
+}
+
+/// WWD_TRACE_OPEN=1: log every guest openat and its outcome.
+fn trace_open() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WWD_TRACE_OPEN").is_some())
 }
 
 unsafe fn fstatat(t: &Thread, dirfd: i64, path: u64, buf: u64, flags: u32) -> i64 {

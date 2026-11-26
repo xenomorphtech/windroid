@@ -7,3 +7,4 @@
 *.bmp
 __pycache__/
 /thunks/out
+/run-og.env

@@ -280,13 +280,29 @@ pub fn call(t: &mut Thread, id: usize) -> (u64, u64) {
                 }
                 r
             }
+            "vkCreateImage" if trace_images() && {
+                // VkImageCreateInfo: format @24, extent @28, mips @40, layers @44, samples @48, usage @56
+                let ci = args[1];
+                let usage: u32 = read_obj(ci + 56);
+                if usage & 0x30 != 0 {
+                    // color or depth/stencil attachment
+                    eprintln!(
+                        "[wwd] image fmt {} {}x{}x{} mips {} layers {} samples {} usage {:#x}",
+                        read_obj::<u32>(ci + 24), read_obj::<u32>(ci + 28), read_obj::<u32>(ci + 32), read_obj::<u32>(ci + 36),
+                        read_obj::<u32>(ci + 40), read_obj::<u32>(ci + 44), read_obj::<u32>(ci + 48), usage
+                    );
+                }
+                false
+            } => unreachable!(),
             "vkCreateImage" => {
                 let fmt: u32 = read_obj(args[1] + 24);
                 if astc::astc_info(fmt).is_some() {
                     let old_fmt = astc::patch_u32(args[1] + 24, astc::replacement(fmt));
                     let flags: u32 = read_obj(args[1] + 16);
                     write_obj(args[1] + 16, flags & !0x80);
+                    let list = patch_view_formats(args[1]);
                     let r = win64_call(resolve(id), &args);
+                    restore_u32s(list);
                     write_obj(args[1] + 24, old_fmt);
                     write_obj(args[1] + 16, flags);
                     if r.0 as i32 == 0 {
@@ -315,7 +331,9 @@ pub fn call(t: &mut Thread, id: usize) -> (u64, u64) {
                     let old_fmt = astc::patch_u32(ci + 24, astc::replacement(fmt));
                     let flags: u32 = read_obj(ci + 16);
                     write_obj(ci + 16, flags & !0x80);
+                    let list = patch_view_formats(ci);
                     let r = win64_call(resolve(id), &args);
+                    restore_u32s(list);
                     write_obj(ci + 24, old_fmt);
                     write_obj(ci + 16, flags);
                     r
@@ -408,7 +426,39 @@ pub fn call(t: &mut Thread, id: usize) -> (u64, u64) {
         }
     };
     trace(t, cmd.name, &args, r.0);
+    report_error(cmd.name, &args, r.0);
     r
+}
+
+/// WWD_TRACE_IMAGES=1: log render-target creations (format, size, usage).
+fn trace_images() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WWD_TRACE_IMAGES").is_some())
+}
+
+/// Log failing VkResult-returning calls (first few per command and code): a
+/// failed pipeline or image creation makes UE silently skip those draws.
+fn report_error(name: &str, args: &[u64], ret: u64) {
+    let code = ret as u32 as i32;
+    if code >= 0 {
+        return;
+    }
+    let returns_result = ["vkCreate", "vkAllocate", "vkBind", "vkMap", "vkQueueSubmit", "vkQueuePresent", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkAcquire", "vkWaitFor"]
+        .iter()
+        .any(|p| name.starts_with(p));
+    if !returns_result {
+        return;
+    }
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<(String, i32), u32>>> = std::sync::Mutex::new(None);
+    let mut g = SEEN.lock().unwrap();
+    let n = g.get_or_insert_with(Default::default).entry((name.to_string(), code)).or_insert(0);
+    *n += 1;
+    if *n <= 5 || n.is_power_of_two() {
+        eprintln!(
+            "[wwd] vulkan: {name} failed: {code} (#{n}) args {}",
+            args.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>().join(", ")
+        );
+    }
 }
 
 /// vkCreateInstance with WSI extension translation and debug-callback stripping.
@@ -495,6 +545,36 @@ fn vk_by_name(name: &str) -> u64 {
     match VK_CMDS.iter().position(|c| c.name == name) {
         Some(id) => resolve(id),
         None => 0,
+    }
+}
+
+/// Map ASTC entries of a VkImageFormatListCreateInfo (sType 1000147000) in a
+/// VkImageCreateInfo's pNext chain to their RGBA8 replacements, so the list
+/// matches the emulated image and its views. Returns what to restore.
+unsafe fn patch_view_formats(ci: u64) -> Vec<(u64, u32)> {
+    let mut old = Vec::new();
+    let mut node: u64 = read_obj(ci + 8);
+    for _ in 0..16 {
+        if node == 0 {
+            break;
+        }
+        if read_obj::<u32>(node) == 1000147000 {
+            let (n, list): (u32, u64) = (read_obj(node + 16), read_obj(node + 24));
+            for i in 0..n.min(64) as u64 {
+                let f: u32 = read_obj(list + 4 * i);
+                if astc::astc_info(f).is_some() {
+                    old.push((list + 4 * i, astc::patch_u32(list + 4 * i, astc::replacement(f))));
+                }
+            }
+        }
+        node = read_obj(node + 8);
+    }
+    old
+}
+
+unsafe fn restore_u32s(v: Vec<(u64, u32)>) {
+    for (a, x) in v {
+        write_obj(a, x);
     }
 }
 

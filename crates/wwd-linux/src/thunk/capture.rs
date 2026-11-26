@@ -68,6 +68,7 @@ pub unsafe fn maybe_capture(vk: Resolver, queue: u64, present: u64) -> bool {
         s.frames += 1;
         (s.frames, s.wanted.contains(&s.frames), s.font_fix.contains(&s.frames))
     });
+    fps_tick(frame);
     if fix {
         eprintln!("[wwd] fontfix at frame {frame}");
         crate::fontfix::run();
@@ -194,4 +195,26 @@ fn write_bmp(path: &str, w: u32, h: u32, px: &[u8], bgra: bool) {
         }
     }
     let _ = std::fs::write(path, out);
+}
+
+/// WWD_FPS=1: print the present rate every 2 seconds.
+fn fps_tick(frame: u64) {
+    use std::sync::{Mutex, OnceLock};
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("WWD_FPS").is_some()) {
+        return;
+    }
+    static LAST: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
+    let now = std::time::Instant::now();
+    let mut l = LAST.lock().unwrap();
+    match *l {
+        None => *l = Some((now, frame)),
+        Some((t, f)) => {
+            let dt = now.duration_since(t).as_secs_f64();
+            if dt >= 2.0 {
+                eprintln!("[wwd] fps {:.1} (frame {frame})", (frame - f) as f64 / dt);
+                *l = Some((now, frame));
+            }
+        }
+    }
 }

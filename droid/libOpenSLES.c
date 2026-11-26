@@ -4,6 +4,7 @@
 // (driving the app's buffer-queue callback like a real device would).
 // Output currently goes to a null sink; the timing is what apps depend on.
 #include <pthread.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,6 +113,11 @@ static SLresult Engine_CreateAudioPlayer(const void *self, const void **out, dat
         }
     }
     if (!p->bytes_per_sec) p->bytes_per_sec = 192000;
+    {
+        char m[96];
+        snprintf(m, sizeof m, "OpenSL audio player created (%u bytes/s)", (unsigned)p->bytes_per_sec);
+        wwd_host_log(4, "wwd-audio", m);
+    }
     *out = &p->object;
     return SL_RESULT_SUCCESS;
 }
@@ -161,6 +167,7 @@ static void *player_thread(void *arg) {
         p->q_head = (p->q_head + 1) % 64;
         p->q_count--;
         p->played++;
+        if (p->played == 1) wwd_host_log(4, "wwd-audio", "OpenSL first buffer played; buffer-queue callback running");
         bq_callback cb = p->cb;
         void *ctx = p->cb_ctx;
         pthread_mutex_unlock(&p->lock);
