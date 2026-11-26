@@ -1,0 +1,13 @@
+[package]
+name = "wwd"
+description = "Run AArch64 Linux (and eventually Android) binaries on Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wwd-cpu = { path = "../wwd-cpu" }
+wwd-linux = { path = "../wwd-linux" }
+windows-sys.workspace = true
+yaxpeax-arch = "0.3"
+yaxpeax-arm = "0.3"

@@ -1,0 +1,79 @@
+
+/// Host entry point by name (device-level names resolve through the instance).
+fn vk_by_name(name: &str) -> u64 {
+    match VK_CMDS.iter().position(|c| c.name == name) {
+        Some(id) => resolve(id),
+        None => 0,
+    }
+}
+
+/// vkCmdCopyBufferToImage into an emulated ASTC image (VkBufferImageCopy, 56 bytes).
+unsafe fn copy_astc_v1(id: usize, args: &[u64], fmt: u32) -> (u64, u64) {
+    let (cmd, src, dst, layout, n, regs) = (args[0], args[1], args[2], args[3], args[4] as u32, args[5]);
+    let Some(device) = astc::cmd_device(cmd) else { return win64_call(resolve(id), args) };
+    let mut rs = Vec::new();
+    for i in 0..n as u64 {
+        let r = regs + i * 56;
+        rs.push(astc::Region {
+            buffer_offset: read_obj(r),
+            row_length: read_obj(r + 8),
+            image_height: read_obj(r + 12),
+            layers: read_obj(r + 28),
+            width: read_obj(r + 44),
+            height: read_obj(r + 48),
+            depth: read_obj(r + 52),
+        });
+    }
+    let Some((staging, offs)) = astc::decode_upload(vk_by_name, device, src, dst, fmt, &rs) else {
+        eprintln!("[wwd] astc: upload decode failed; skipping copy");
+        return (0, 0);
+    };
+    let mut copy = vec![0u8; 56 * n as usize];
+    std::ptr::copy_nonoverlapping(crate::mem::untag(regs) as *const u8, copy.as_mut_ptr(), copy.len());
+    for (i, off) in offs.iter().enumerate() {
+        let b = &mut copy[i * 56..];
+        b[0..8].copy_from_slice(&off.to_le_bytes());
+        b[8..16].fill(0); // rowLength, imageHeight = tightly packed
+    }
+    win64_call(resolve(id), &[cmd, staging, dst, layout, n as u64, copy.as_ptr() as u64])
+}
+
+/// vkCmdCopyBufferToImage2 (VkCopyBufferToImageInfo2 + VkBufferImageCopy2, 72 bytes).
+unsafe fn copy_astc_v2(id: usize, args: &[u64], fmt: u32) -> (u64, u64) {
+    let (cmd, info) = (args[0], args[1]);
+    let Some(device) = astc::cmd_device(cmd) else { return win64_call(resolve(id), args) };
+    let (src, dst): (u64, u64) = (read_obj(info + 16), read_obj(info + 24));
+    let n: u32 = read_obj(info + 36);
+    let regs: u64 = read_obj(info + 40);
+    let mut rs = Vec::new();
+    for i in 0..n as u64 {
+        let r = regs + i * 72;
+        rs.push(astc::Region {
+            buffer_offset: read_obj(r + 16),
+            row_length: read_obj(r + 24),
+            image_height: read_obj(r + 28),
+            layers: read_obj(r + 44),
+            width: read_obj(r + 60),
+            height: read_obj(r + 64),
+            depth: read_obj(r + 68),
+        });
+    }
+    let Some((staging, offs)) = astc::decode_upload(vk_by_name, device, src, dst, fmt, &rs) else {
+        eprintln!("[wwd] astc: upload decode failed; skipping copy");
+        return (0, 0);
+    };
+    let mut copy = vec![0u8; 72 * n as usize];
+    std::ptr::copy_nonoverlapping(crate::mem::untag(regs) as *const u8, copy.as_mut_ptr(), copy.len());
+    for (i, off) in offs.iter().enumerate() {
+        let b = &mut copy[i * 72..];
+        b[8..16].fill(0); // pNext
+        b[16..24].copy_from_slice(&off.to_le_bytes());
+        b[24..32].fill(0);
+    }
+    let mut ci = [0u8; 48];
+    std::ptr::copy_nonoverlapping(crate::mem::untag(info) as *const u8, ci.as_mut_ptr(), 48);
+    ci[8..16].fill(0);
+    ci[16..24].copy_from_slice(&staging.to_le_bytes());
+    ci[40..48].copy_from_slice(&(copy.as_ptr() as u64).to_le_bytes());
+    win64_call(resolve(id), &[cmd, ci.as_ptr() as u64])
+}

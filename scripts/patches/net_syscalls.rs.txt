@@ -1,0 +1,170 @@
+            SOCKET => {
+                let (fam, ty) = (a[0] as u32, a[1] as u32);
+                if fam == crate::net::LINUX_AF_UNIX {
+                    return ok(-crate::net::EAFNOSUPPORT);
+                }
+                match crate::net::socket(fam, ty, a[2] as u32) {
+                    Ok(s) => {
+                        let fl = if ty & crate::net::SOCK_NONBLOCK != 0 { O_NONBLOCK | O_RDWR } else { O_RDWR };
+                        let f = fs::open_ref(Node::Socket(s), fl);
+                        ok(p.fds.lock().unwrap().alloc(f, ty & crate::net::SOCK_CLOEXEC != 0, 0))
+                    }
+                    Err(e) => ok(-e),
+                }
+            }
+            200 | 203 => {
+                // bind / connect
+                with_sock(t, a[0], |s| {
+                    let sa = match crate::net::sockaddr_in(a[1], a[2] as u32) {
+                        Ok(b) => b,
+                        Err(e) => return -e,
+                    };
+                    let r = if n == 200 {
+                        windows_sys::Win32::Networking::WinSock::bind(s.s, sa.as_ptr() as *const _, sa.len() as i32)
+                    } else {
+                        windows_sys::Win32::Networking::WinSock::connect(s.s, sa.as_ptr() as *const _, sa.len() as i32)
+                    };
+                    crate::net::ret(r)
+                })
+            }
+            201 => with_sock(t, a[0], |s| crate::net::ret(windows_sys::Win32::Networking::WinSock::listen(s.s, a[1] as i32))),
+            202 | 242 => {
+                // accept / accept4
+                let file = p.fds.lock().unwrap().get(a[0] as i32 as i64);
+                let Some(file) = file else { return ok(-EBADF) };
+                let mut buf = [0u8; 128];
+                let mut len: i32 = 128;
+                let ns = {
+                    let n = file.node.lock().unwrap();
+                    let Node::Socket(s) = &*n else { return ok(-ENOTSOCK) };
+                    windows_sys::Win32::Networking::WinSock::accept(s.s, buf.as_mut_ptr() as *mut _, &mut len)
+                };
+                if ns == windows_sys::Win32::Networking::WinSock::INVALID_SOCKET {
+                    return ok(-crate::net::last_errno());
+                }
+                crate::net::sockaddr_out(&buf[..len as usize], a[1], a[2]);
+                let fl4 = if n == 242 { a[3] as u32 } else { 0 };
+                let s = crate::net::Socket { s: ns, family: crate::net::LINUX_AF_INET, nonblock: fl4 & crate::net::SOCK_NONBLOCK != 0 };
+                crate::net::set_nonblock(&s, s.nonblock);
+                let f = fs::open_ref(Node::Socket(s), O_RDWR | (fl4 & O_NONBLOCK));
+                ok(p.fds.lock().unwrap().alloc(f, fl4 & crate::net::SOCK_CLOEXEC != 0, 0))
+            }
+            204 | 205 => with_sock(t, a[0], |s| {
+                let mut buf = [0u8; 128];
+                let mut len: i32 = 128;
+                let r = if n == 204 {
+                    windows_sys::Win32::Networking::WinSock::getsockname(s.s, buf.as_mut_ptr() as *mut _, &mut len)
+                } else {
+                    windows_sys::Win32::Networking::WinSock::getpeername(s.s, buf.as_mut_ptr() as *mut _, &mut len)
+                };
+                if r == 0 {
+                    crate::net::sockaddr_out(&buf[..len as usize], a[1], a[2]);
+                }
+                crate::net::ret(r)
+            }),
+            206 => with_sock(t, a[0], |s| {
+                // sendto(fd, buf, len, flags, addr, addrlen)
+                mem::prefault(a[1], a[2]);
+                let data = slice(a[1], a[2]);
+                let r = if a[4] != 0 {
+                    match crate::net::sockaddr_in(a[4], a[5] as u32) {
+                        Ok(sa) => windows_sys::Win32::Networking::WinSock::sendto(s.s, data.as_ptr(), data.len() as i32, 0, sa.as_ptr() as *const _, sa.len() as i32),
+                        Err(e) => return -e,
+                    }
+                } else {
+                    windows_sys::Win32::Networking::WinSock::send(s.s, data.as_ptr(), data.len() as i32, 0)
+                };
+                crate::net::ret(r)
+            }),
+            207 => with_sock(t, a[0], |s| {
+                // recvfrom(fd, buf, len, flags, addr, addrlen)
+                mem::prefault(a[1], a[2]);
+                let data = slice_mut(a[1], a[2]);
+                let flags = if a[3] & 2 != 0 { 2 } else { 0 }; // MSG_PEEK
+                if a[3] & 0x40 != 0 && crate::net::readiness(s) & crate::pipe::POLLIN == 0 {
+                    return -EAGAIN; // MSG_DONTWAIT
+                }
+                let mut buf = [0u8; 128];
+                let mut len: i32 = 128;
+                let r = windows_sys::Win32::Networking::WinSock::recvfrom(s.s, data.as_mut_ptr(), data.len() as i32, flags, buf.as_mut_ptr() as *mut _, &mut len);
+                if r >= 0 && a[4] != 0 {
+                    crate::net::sockaddr_out(&buf[..len.max(0) as usize], a[4], a[5]);
+                }
+                crate::net::ret(r)
+            }),
+            208 | 209 => with_sock(t, a[0], |s| {
+                let Some((lvl, name)) = crate::net::map_opt(a[1] as i32, a[2] as i32) else {
+                    if n == 209 && a[3] != 0 {
+                        write_obj(a[3], 0u32);
+                        if a[4] != 0 {
+                            write_obj(a[4], 4u32);
+                        }
+                    }
+                    return 0;
+                };
+                let is_timeo = a[1] == 1 && (a[2] == 20 || a[2] == 21);
+                if n == 208 {
+                    if is_timeo {
+                        // Linux timeval -> Windows DWORD milliseconds
+                        let tv: [i64; 2] = read_obj(a[3]);
+                        let ms: u32 = (tv[0] * 1000 + tv[1] / 1000).max(0) as u32;
+                        return crate::net::ret(windows_sys::Win32::Networking::WinSock::setsockopt(s.s, lvl, name, &ms as *const u32 as *const u8, 4));
+                    }
+                    let v = slice(a[3], a[4]);
+                    crate::net::ret(windows_sys::Win32::Networking::WinSock::setsockopt(s.s, lvl, name, v.as_ptr(), v.len() as i32))
+                } else {
+                    let mut buf = [0u8; 16];
+                    let mut len: i32 = 16;
+                    let r = windows_sys::Win32::Networking::WinSock::getsockopt(s.s, lvl, name, buf.as_mut_ptr(), &mut len);
+                    if r == 0 {
+                        let mut v = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+                        if a[1] == 1 && a[2] == 4 && v != 0 {
+                            // SO_ERROR holds a WSA code: translate to errno
+                            windows_sys::Win32::Networking::WinSock::WSASetLastError(v as i32);
+                            v = crate::net::last_errno() as u32;
+                        }
+                        write_obj(a[3], v);
+                        write_obj(a[4], 4u32);
+                    }
+                    crate::net::ret(r)
+                }
+            }),
+            210 => with_sock(t, a[0], |s| crate::net::ret(windows_sys::Win32::Networking::WinSock::shutdown(s.s, a[1] as i32))),
+            211 | 212 => with_sock(t, a[0], |s| {
+                // sendmsg / recvmsg: msghdr { name, namelen, iov, iovlen, control, controllen, flags }
+                let (name, namelen, iov, iovlen): (u64, u32, u64, u64) = (read_obj(a[1]), read_obj(a[1] + 8), read_obj(a[1] + 16), read_obj(a[1] + 24));
+                let mut total = 0i64;
+                for i in 0..iovlen {
+                    let v: Iovec = read_obj(iov + i * 16);
+                    if v.len == 0 {
+                        continue;
+                    }
+                    mem::prefault(v.base, v.len);
+                    let r = if n == 211 {
+                        let d = slice(v.base, v.len);
+                        if name != 0 && total == 0 {
+                            match crate::net::sockaddr_in(name, namelen) {
+                                Ok(sa) => windows_sys::Win32::Networking::WinSock::sendto(s.s, d.as_ptr(), d.len() as i32, 0, sa.as_ptr() as *const _, sa.len() as i32),
+                                Err(e) => return -e,
+                            }
+                        } else {
+                            windows_sys::Win32::Networking::WinSock::send(s.s, d.as_ptr(), d.len() as i32, 0)
+                        }
+                    } else {
+                        let d = slice_mut(v.base, v.len);
+                        windows_sys::Win32::Networking::WinSock::recv(s.s, d.as_mut_ptr(), d.len() as i32, 0)
+                    };
+                    if r < 0 {
+                        return if total > 0 { total } else { -crate::net::last_errno() };
+                    }
+                    total += r as i64;
+                    if (r as u64) < v.len {
+                        break;
+                    }
+                }
+                if n == 212 {
+                    write_obj(a[1] + 40, 0u64); // no control data
+                    write_obj(a[1] + 48, 0u32);
+                }
+                total
+            }),

@@ -1,0 +1,9 @@
+/target
+/tools
+/guest/out
+/rootfs
+/games
+/rootfs-android
+*.bmp
+__pycache__/
+/thunks/out

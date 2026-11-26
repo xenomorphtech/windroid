@@ -1,0 +1,11 @@
+[package]
+name = "wwd-linux"
+description = "User-mode Linux/arm64 personality for Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wwd-cpu = { path = "../wwd-cpu" }
+astc-decode = "0.3"
+windows-sys = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Networking_WinSock"] }

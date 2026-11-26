@@ -1,0 +1,158 @@
+
+// ---- netd dnsproxyd emulation ----------------------------------------------
+//
+// bionic's getaddrinfo/gethostbyname send a text request to netd's
+// /dev/socket/dnsproxyd and parse a binary reply. Our replacement
+// libnetd_client opens /dev/socket/dnsproxyd, which wwd serves here using the
+// host resolver.
+
+fn be32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+struct HostAddr {
+    family: u32, // Linux AF
+    socktype: i32,
+    protocol: i32,
+    addr: Vec<u8>, // Linux-format sockaddr
+}
+
+fn host_lookup(host: Option<&str>, serv: Option<&str>, flags: i32, family: u32, socktype: i32, protocol: i32) -> Result<(Vec<HostAddr>, Option<String>), i32> {
+    init();
+    use std::ffi::CString;
+    let h = host.map(|s| CString::new(s).unwrap());
+    let sv = serv.map(|s| CString::new(s).unwrap());
+    let mut hints: ws::ADDRINFOA = unsafe { std::mem::zeroed() };
+    hints.ai_family = match family {
+        LINUX_AF_INET => ws::AF_INET as i32,
+        LINUX_AF_INET6 => ws::AF_INET6 as i32,
+        _ => 0,
+    };
+    hints.ai_socktype = socktype;
+    hints.ai_protocol = protocol;
+    // AI_PASSIVE 1, AI_CANONNAME 2, AI_NUMERICHOST 4 match; ignore the rest
+    hints.ai_flags = flags & 7;
+    let mut res: *mut ws::ADDRINFOA = std::ptr::null_mut();
+    let r = unsafe {
+        ws::getaddrinfo(
+            h.as_ref().map(|c| c.as_ptr() as *const u8).unwrap_or(std::ptr::null()),
+            sv.as_ref().map(|c| c.as_ptr() as *const u8).unwrap_or(std::ptr::null()),
+            &hints,
+            &mut res,
+        )
+    };
+    if r != 0 {
+        // bionic EAI_* numbering: EAI_AGAIN 2, EAI_NONAME 8, EAI_SERVICE 9
+        return Err(match r {
+            ws::WSATRY_AGAIN => 2,
+            ws::WSATYPE_NOT_FOUND => 9,
+            _ => 8,
+        });
+    }
+    let mut out = Vec::new();
+    let mut canon = None;
+    let mut p = res;
+    while !p.is_null() {
+        let ai = unsafe { &*p };
+        if canon.is_none() && !ai.ai_canonname.is_null() {
+            canon = Some(unsafe { std::ffi::CStr::from_ptr(ai.ai_canonname as *const i8) }.to_string_lossy().into_owned());
+        }
+        if ai.ai_family == ws::AF_INET as i32 || ai.ai_family == ws::AF_INET6 as i32 {
+            let raw = unsafe { std::slice::from_raw_parts(ai.ai_addr as *const u8, ai.ai_addrlen) };
+            let mut b = raw.to_vec();
+            let lf = if ai.ai_family == ws::AF_INET6 as i32 { LINUX_AF_INET6 } else { LINUX_AF_INET };
+            b[0..2].copy_from_slice(&(lf as u16).to_le_bytes());
+            out.push(HostAddr { family: lf, socktype: ai.ai_socktype, protocol: ai.ai_protocol, addr: b });
+        }
+        p = ai.ai_next;
+    }
+    unsafe { ws::freeaddrinfo(res) };
+    Ok((out, canon))
+}
+
+fn opt(s: &str) -> Option<&str> {
+    if s == "^" { None } else { Some(s) }
+}
+
+fn dns_fail(out: &mut Vec<u8>, code: u32) {
+    out.extend_from_slice(b"401\0");
+    be32(out, code);
+}
+
+/// Answer one dnsproxyd request (without the trailing NUL).
+pub fn dns_query(req: &str) -> Vec<u8> {
+    let w: Vec<&str> = req.split(' ').collect();
+    let mut out = Vec::new();
+    let trace = std::env::var_os("WWD_TRACE_DNS").is_some();
+    match w.first().copied() {
+        Some("getaddrinfo") if w.len() >= 7 => {
+            let flags: i32 = w[3].parse().unwrap_or(0);
+            let r = host_lookup(opt(w[1]), opt(w[2]), flags, w[4].parse().unwrap_or(0), w[5].parse().unwrap_or(0), w[6].parse().unwrap_or(0));
+            if trace {
+                match &r {
+                    Ok((v, _)) => eprintln!("[wwd] dns: {req} -> {} addresses", v.len()),
+                    Err(e) => eprintln!("[wwd] dns: {req} -> EAI {e}"),
+                }
+            }
+            match r {
+                Ok((addrs, canon)) if !addrs.is_empty() => {
+                    out.extend_from_slice(b"222\0");
+                    for (i, a) in addrs.iter().enumerate() {
+                        be32(&mut out, 1);
+                        be32(&mut out, flags as u32);
+                        be32(&mut out, a.family);
+                        be32(&mut out, a.socktype as u32);
+                        be32(&mut out, a.protocol as u32);
+                        be32(&mut out, a.addr.len() as u32);
+                        out.extend_from_slice(&a.addr);
+                        match (&canon, i) {
+                            (Some(c), 0) if flags & 2 != 0 => {
+                                be32(&mut out, c.len() as u32 + 1);
+                                out.extend_from_slice(c.as_bytes());
+                                out.push(0);
+                            }
+                            _ => be32(&mut out, 0),
+                        }
+                    }
+                    be32(&mut out, 0);
+                }
+                Ok(_) => dns_fail(&mut out, 8),
+                Err(e) => dns_fail(&mut out, e as u32),
+            }
+        }
+        Some("gethostbyname") if w.len() >= 4 => {
+            // gethostbyname <netid> <name> <af>
+            let af: u32 = w[3].parse().unwrap_or(LINUX_AF_INET);
+            let r = host_lookup(Some(w[2]), None, 0, af, 1, 0);
+            if trace {
+                eprintln!("[wwd] dns: {req} -> {}", r.as_ref().map(|(v, _)| v.len() as i64).unwrap_or(-1));
+            }
+            match r {
+                Ok((addrs, _)) if !addrs.is_empty() => {
+                    out.extend_from_slice(b"222\0");
+                    be32(&mut out, w[2].len() as u32 + 1);
+                    out.extend_from_slice(w[2].as_bytes());
+                    out.push(0);
+                    be32(&mut out, 0); // no aliases
+                    let len: u32 = if af == LINUX_AF_INET6 { 16 } else { 4 };
+                    be32(&mut out, af);
+                    be32(&mut out, len);
+                    for a in &addrs {
+                        let raw = if af == LINUX_AF_INET6 { &a.addr[8..24] } else { &a.addr[4..8] };
+                        be32(&mut out, len);
+                        out.extend_from_slice(raw);
+                    }
+                    be32(&mut out, 0);
+                }
+                _ => dns_fail(&mut out, 1),
+            }
+        }
+        _ => {
+            if trace {
+                eprintln!("[wwd] dns: unsupported request {req:?}");
+            }
+            dns_fail(&mut out, 8)
+        }
+    }
+    out
+}

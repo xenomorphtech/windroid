@@ -1,0 +1,10 @@
+[package]
+name = "wwd-cpu"
+description = "AArch64 guest CPU: decoder, interpreter and x86-64 JIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iced-x86 = { version = "1.21", features = ["code_asm"] }
+windows-sys.workspace = true

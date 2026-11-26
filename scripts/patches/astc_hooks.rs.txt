@@ -1,0 +1,138 @@
+            // ---- ASTC emulation (see astc.rs) ----
+            "vkGetPhysicalDeviceFeatures" => {
+                let r = win64_call(resolve(id), &args);
+                write_obj(args[1] + 84, 1u32); // textureCompressionASTC_LDR
+                r
+            }
+            "vkGetPhysicalDeviceFeatures2" | "vkGetPhysicalDeviceFeatures2KHR" => {
+                let r = win64_call(resolve(id), &args);
+                write_obj(args[1] + 16 + 84, 1u32);
+                r
+            }
+            "vkGetPhysicalDeviceFormatProperties" | "vkGetPhysicalDeviceFormatProperties2" | "vkGetPhysicalDeviceFormatProperties2KHR" => {
+                let mut a = args.clone();
+                a[1] = astc::replacement(a[1] as u32) as u64;
+                win64_call(resolve(id), &a)
+            }
+            "vkGetPhysicalDeviceImageFormatProperties" => {
+                let mut a = args.clone();
+                if astc::astc_info(a[1] as u32).is_some() {
+                    a[1] = astc::replacement(a[1] as u32) as u64;
+                    a[5] &= !0x80; // BLOCK_TEXEL_VIEW_COMPATIBLE
+                }
+                win64_call(resolve(id), &a)
+            }
+            "vkGetPhysicalDeviceImageFormatProperties2" | "vkGetPhysicalDeviceImageFormatProperties2KHR" => {
+                let fmt: u32 = read_obj(args[1] + 16);
+                if astc::astc_info(fmt).is_some() {
+                    let old = astc::patch_u32(args[1] + 16, astc::replacement(fmt));
+                    let r = win64_call(resolve(id), &args);
+                    write_obj(args[1] + 16, old);
+                    r
+                } else {
+                    win64_call(resolve(id), &args)
+                }
+            }
+            "vkCreateDevice" => {
+                // the host has no ASTC: don't ask it for the feature we emulate
+                let mut restore: Vec<(u64, u32)> = Vec::new();
+                let feats: u64 = read_obj(args[1] + 64);
+                if feats != 0 {
+                    restore.push((feats + 84, astc::patch_u32(feats + 84, 0)));
+                }
+                let mut node: u64 = read_obj(args[1] + 8);
+                while node != 0 {
+                    if read_obj::<u32>(node) == 1000059000 {
+                        restore.push((node + 16 + 84, astc::patch_u32(node + 16 + 84, 0)));
+                    }
+                    node = read_obj(node + 8);
+                }
+                let r = win64_call(resolve(id), &args);
+                for (a, v) in restore {
+                    write_obj(a, v);
+                }
+                if r.0 as i32 == 0 {
+                    astc::note_device(read_obj(args[3]), args[0]);
+                }
+                r
+            }
+            "vkAllocateCommandBuffers" => {
+                let r = win64_call(resolve(id), &args);
+                if r.0 as i32 == 0 {
+                    let n: u32 = read_obj(args[1] + 28);
+                    for i in 0..n as u64 {
+                        astc::note_cmd(read_obj(args[2] + i * 8), args[0]);
+                    }
+                }
+                r
+            }
+            "vkCreateImage" => {
+                let fmt: u32 = read_obj(args[1] + 24);
+                if astc::astc_info(fmt).is_some() {
+                    let old_fmt = astc::patch_u32(args[1] + 24, astc::replacement(fmt));
+                    let flags: u32 = read_obj(args[1] + 16);
+                    write_obj(args[1] + 16, flags & !0x80);
+                    let r = win64_call(resolve(id), &args);
+                    write_obj(args[1] + 24, old_fmt);
+                    write_obj(args[1] + 16, flags);
+                    if r.0 as i32 == 0 {
+                        astc::note_image(read_obj(args[3]), fmt);
+                    }
+                    r
+                } else {
+                    win64_call(resolve(id), &args)
+                }
+            }
+            "vkCreateImageView" => {
+                let fmt: u32 = read_obj(args[1] + 36);
+                if astc::astc_info(fmt).is_some() {
+                    let old = astc::patch_u32(args[1] + 36, astc::replacement(fmt));
+                    let r = win64_call(resolve(id), &args);
+                    write_obj(args[1] + 36, old);
+                    r
+                } else {
+                    win64_call(resolve(id), &args)
+                }
+            }
+            "vkDestroyImage" => {
+                let r = win64_call(resolve(id), &args);
+                astc::free_staging(vk_by_name, astc::forget_image(args[1]));
+                r
+            }
+            "vkBindBufferMemory" => {
+                astc::note_buffer_bind(args[1], args[2], args[3]);
+                win64_call(resolve(id), &args)
+            }
+            "vkBindBufferMemory2" | "vkBindBufferMemory2KHR" => {
+                for i in 0..args[1] {
+                    let info = args[2] + i * 40;
+                    astc::note_buffer_bind(read_obj(info + 16), read_obj(info + 24), read_obj(info + 32));
+                }
+                win64_call(resolve(id), &args)
+            }
+            "vkMapMemory" => {
+                let r = win64_call(resolve(id), &args);
+                if r.0 as i32 == 0 {
+                    astc::note_map(args[1], args[2], read_obj(args[5]));
+                }
+                r
+            }
+            "vkMapMemory2" | "vkMapMemory2KHR" => {
+                let r = win64_call(resolve(id), &args);
+                if r.0 as i32 == 0 {
+                    astc::note_map(read_obj(args[1] + 24), read_obj(args[1] + 32), read_obj(args[2]));
+                }
+                r
+            }
+            "vkUnmapMemory" => {
+                astc::note_unmap(args[1]);
+                win64_call(resolve(id), &args)
+            }
+            "vkCmdCopyBufferToImage" => match astc::image_format(args[2]) {
+                Some(fmt) => copy_astc_v1(id, &args, fmt),
+                None => win64_call(resolve(id), &args),
+            },
+            "vkCmdCopyBufferToImage2" | "vkCmdCopyBufferToImage2KHR" => match astc::image_format(read_obj(args[1] + 24)) {
+                Some(fmt) => copy_astc_v2(id, &args, fmt),
+                None => win64_call(resolve(id), &args),
+            },
