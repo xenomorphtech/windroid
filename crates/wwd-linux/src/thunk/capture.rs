@@ -16,6 +16,8 @@ struct State {
     frames: u64,
     wanted: Vec<u64>,
     font_fix: Vec<u64>,
+    mem_dump: Vec<u64>,
+    rdoc: Vec<u64>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -25,12 +27,14 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(g.get_or_insert_with(|| State {
         wanted: std::env::var("WWD_CAPTURE").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
         font_fix: std::env::var("WWD_FONT_FIX").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
+        rdoc: std::env::var("WWD_RDOC").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
+        mem_dump: std::env::var("WWD_MEMDUMP").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
         ..Default::default()
     }))
 }
 
 pub fn enabled() -> bool {
-    with(|s| !s.wanted.is_empty() || !s.font_fix.is_empty())
+    with(|s| !s.wanted.is_empty() || !s.font_fix.is_empty() || !s.mem_dump.is_empty())
 }
 
 /// Before vkCreateSwapchainKHR: make images readable by transfers.
@@ -64,11 +68,17 @@ pub fn note_queue(device: u64, family: u32, queue: u64) {
 /// Called before vkQueuePresentKHR. Returns true if it consumed the present's
 /// wait semaphores (the caller must then present without waiting).
 pub unsafe fn maybe_capture(vk: Resolver, queue: u64, present: u64) -> bool {
-    let (frame, want, fix) = with(|s| {
+    let (frame, want, fix, dump, rdoc) = with(|s| {
         s.frames += 1;
-        (s.frames, s.wanted.contains(&s.frames), s.font_fix.contains(&s.frames))
+        (s.frames, s.wanted.contains(&s.frames), s.font_fix.contains(&s.frames), s.mem_dump.contains(&s.frames), s.rdoc.contains(&s.frames))
     });
+    if rdoc {
+        crate::memdump::renderdoc_trigger(frame);
+    }
     fps_tick(frame);
+    if dump {
+        crate::memdump::run(frame);
+    }
     if fix {
         eprintln!("[wwd] fontfix at frame {frame}");
         crate::fontfix::run();

@@ -13,6 +13,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdio.h>
+#include "wwd_host.h"
+
+#define ALOG(...) do { char m_[256]; snprintf(m_, sizeof m_, __VA_ARGS__); wwd_host_log(4, "wwd-audio", m_); } while (0)
 
 #define EXPORT __attribute__((visibility("default")))
 
@@ -91,7 +95,10 @@ static void *callback_thread(void *arg) {
         int r = s->cfg.data_cb(s, s->cfg.data_user, s->cb_buf, s->burst);
         pthread_mutex_lock(&s->mu);
         s->frames += s->burst;
+        int64_t done = s->frames;
         pthread_mutex_unlock(&s->mu);
+        if (done == s->burst || done % ((int64_t)s->cfg.rate * 30 / s->burst * s->burst) == 0)
+            ALOG("AAudio callback running: %lld frames (%lld s), last result %d", (long long)done, (long long)(done / s->cfg.rate), r);
         if (r == AAUDIO_CALLBACK_RESULT_STOP) {
             pthread_mutex_lock(&s->mu);
             set_state(s, AAUDIO_STREAM_STATE_STOPPED);
@@ -114,6 +121,7 @@ EXPORT aaudio_result_t AAudio_createStreamBuilder(AAudioStreamBuilder **out) {
     b->format = AAUDIO_FORMAT_PCM_FLOAT;
     b->session = -1;
     *out = b;
+    ALOG("AAudio builder created");
     return AAUDIO_OK;
 }
 EXPORT aaudio_result_t AAudioStreamBuilder_delete(AAudioStreamBuilder *b) { free(b); return AAUDIO_OK; }
@@ -164,11 +172,15 @@ EXPORT aaudio_result_t AAudioStreamBuilder_openStream(AAudioStreamBuilder *b, AA
     s->state = AAUDIO_STREAM_STATE_OPEN;
     s->cb_buf = calloc((size_t)s->burst, (size_t)bytes_per_frame(s));
     *out = s;
+    ALOG("AAudio openStream: dir %d rate %d ch %d (mask %#x) fmt %d sharing %d perf %d usage %d cbframes %d cap %d datacb %d",
+         b->direction, b->rate, b->channels, b->channel_mask, b->format, b->sharing, b->perf, b->usage, b->frames_per_cb,
+         b->capacity, b->data_cb != NULL);
     return AAUDIO_OK;
 }
 
 // ---- stream control ----
 EXPORT aaudio_result_t AAudioStream_requestStart(AAudioStream *s) {
+    ALOG("AAudio requestStart (state %d)", s->state);
     pthread_mutex_lock(&s->mu);
     s->start_ns = now_ns();
     s->start_frames = s->frames;
@@ -181,6 +193,7 @@ EXPORT aaudio_result_t AAudioStream_requestStart(AAudioStream *s) {
 }
 
 static aaudio_result_t halt(AAudioStream *s, int32_t final_state) {
+    ALOG("AAudio stream -> state %d (consumed %lld frames)", final_state, (long long)s->frames);
     pthread_mutex_lock(&s->mu);
     s->frames = position_now(s) > s->frames && !s->cfg.data_cb ? position_now(s) : s->frames;
     set_state(s, final_state);

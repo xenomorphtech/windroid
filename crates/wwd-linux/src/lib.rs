@@ -11,6 +11,7 @@ pub mod loader;
 pub mod mem;
 pub mod net;
 pub mod fontfix;
+pub mod memdump;
 pub mod pipe;
 pub mod props;
 pub mod signal;

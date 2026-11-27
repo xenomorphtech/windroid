@@ -397,6 +397,26 @@ pub fn call(t: &mut Thread, id: usize) -> (u64, u64) {
             "vkCreateAndroidSurfaceKHR" => create_android_surface(&args),
             // no AHardwareBuffers exist under wwd
             "vkGetAndroidHardwareBufferPropertiesANDROID" | "vkGetMemoryAndroidHardwareBufferANDROID" => (-1000072003i32 as u32 as u64, 0),
+            "vkEnumerateDeviceExtensionProperties" if args[3] != 0 && !hidden_device_exts().is_empty() => {
+                // WWD_HIDE_DEVICE_EXT: drop these from the list the guest sees
+                let r = win64_call(resolve(id), &args);
+                if r.0 as i32 >= 0 {
+                    let n: u32 = read_obj(args[2]);
+                    let mut k = 0u64;
+                    for i in 0..n as u64 {
+                        let e = args[3] + i * 260;
+                        if hidden_device_exts().iter().any(|h| h.as_bytes() == crate::mem::cstr(e)) {
+                            continue;
+                        }
+                        if k != i {
+                            std::ptr::copy(e as *const u8, (args[3] + k * 260) as *mut u8, 260);
+                        }
+                        k += 1;
+                    }
+                    write_obj(args[2], k as u32);
+                }
+                r
+            }
             "vkEnumerateInstanceExtensionProperties" => {
                 let f = resolve(id);
                 let r = win64_call(f, &args);
@@ -428,6 +448,16 @@ pub fn call(t: &mut Thread, id: usize) -> (u64, u64) {
     trace(t, cmd.name, &args, r.0);
     report_error(cmd.name, &args, r.0);
     r
+}
+
+/// WWD_HIDE_DEVICE_EXT=VK_EXT_a,VK_KHR_b: device extensions hidden from the guest.
+fn hidden_device_exts() -> &'static [String] {
+    static V: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("WWD_HIDE_DEVICE_EXT")
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default()
+    })
 }
 
 /// WWD_TRACE_IMAGES=1: log render-target creations (format, size, usage).

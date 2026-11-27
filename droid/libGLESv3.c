@@ -26,12 +26,19 @@ static const char *ext_joined(void) {
     return buf;
 }
 
+// WWD_GL_VENDOR / WWD_GL_RENDERER: report another GPU (UE picks its device
+// profile from GL_RENDERER)
+static const char *env_or(const char *k, const char *d) {
+    const char *v = getenv(k);
+    return v && *v ? v : d;
+}
+
 static int next_name = 1;
 
 const unsigned char *glGetString(unsigned name) {
     switch (name) {
-    case 0x1F00: return (const unsigned char *)"Qualcomm";                          // GL_VENDOR
-    case 0x1F01: return (const unsigned char *)"Adreno (TM) 740";                   // GL_RENDERER
+    case 0x1F00: return (const unsigned char *)env_or("WWD_GL_VENDOR", "Qualcomm");                          // GL_VENDOR
+    case 0x1F01: return (const unsigned char *)env_or("WWD_GL_RENDERER", "Adreno (TM) 740");                   // GL_RENDERER
     case 0x1F02: return (const unsigned char *)"OpenGL ES 3.2 V@0676.42 (GIT@wwd)";  // GL_VERSION
     case 0x8B8C: return (const unsigned char *)"OpenGL ES GLSL ES 3.20";             // SHADING_LANGUAGE_VERSION
     case 0x1F03: return (const unsigned char *)ext_joined();                         // GL_EXTENSIONS
